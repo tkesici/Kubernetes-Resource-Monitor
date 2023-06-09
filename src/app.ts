@@ -109,33 +109,48 @@ async function main() {
         }
 
         for (const podName of Object.keys(pod)) {
+            memoryMetrics.labels(
+                {
+                    type: 'request_diff',
+                    pod: podName
+                })
+                .set(pod[podName].memoryUsage - (pod[podName].memoryRequest ?? 0));
             if(pod[podName].hasOwnProperty('memoryRequest')){
-                memoryMetrics.labels(
-                    {
-                        type: 'request_diff',
-                        pod: podName
-                    })
-                    .set(pod[podName].memoryUsage - pod[podName].memoryRequest);
                 memoryMetrics.labels(
                     {
                         type: 'request_percentage',
                         pod: podName
                     })
                     .set((pod[podName].memoryUsage / pod[podName].memoryRequest) * 100)
-            }
-            if(pod[podName].hasOwnProperty('cpuRequest')) {
-                cpuMetrics.labels(
+            } else {
+                memoryMetrics.labels(
                     {
-                        type: 'request_diff',
+                        type: 'request_percentage',
                         pod: podName
                     })
-                    .set(pod[podName].cpuUsage - pod[podName].cpuRequest);
+                    .set(999999)
+            }
+            cpuMetrics.labels(
+                {
+                    type: 'request_diff',
+                    pod: podName
+                })
+                .set(pod[podName].cpuUsage - (pod[podName].cpuRequest ?? 0));
+            if(pod[podName].hasOwnProperty('cpuRequest')) {
                 cpuMetrics.labels(
                     {
                         type: 'request_percentage',
                         pod: podName
                     })
                     .set((pod[podName].cpuUsage / pod[podName].cpuRequest) * 100)
+            }
+            else {
+                cpuMetrics.labels(
+                    {
+                        type: 'request_percentage',
+                        pod: podName
+                    })
+                    .set(999999)
             }
         }
 
