@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: metricreader-service
+  labels:
+    app: metricreader
+spec:
+  ports:
+    - name: http
+      protocol: TCP
+      port: 3000
+      targetPort: 3000
+  selector:
+    app: metricreader
+  type: ClusterIP
+  sessionAffinity: None
+  ipFamilies:
+    - IPv4
+  ipFamilyPolicy: SingleStack
+  internalTrafficPolicy: Cluster

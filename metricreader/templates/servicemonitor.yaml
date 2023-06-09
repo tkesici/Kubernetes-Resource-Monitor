@@ -1,0 +1,19 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  labels:
+    app: metricreader
+    k8slens-edit-resource-version: v1
+    release: ps
+  name: metricreader-servicemon
+spec:
+  endpoints:
+    - interval: 10s
+      path: /
+      targetPort: 3000
+  namespaceSelector:
+    matchNames:
+      - metricreader
+  selector:
+    matchLabels:
+      app: metricreader
