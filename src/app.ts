@@ -1,8 +1,9 @@
-import axios from 'axios';
 import * as dotenv from 'dotenv'
 import prometheusClient, {Gauge} from "prom-client";
 import * as http from "http";
-const regression = require('regression');
+import { average, outlierAverage, polynomialRegression } from './helpers/estimation';
+import { byteToMegabyte, coreToMilicore} from "./operations/conversion";
+import * as prometheusRequest from './operations/prometheusRequests';
 
 dotenv.config();
 prometheusClient.collectDefaultMetrics();
@@ -16,118 +17,14 @@ const metricsServer = http.createServer((req, res) => {
 });
 metricsServer.listen(3000);
 
-async function memoryUsage(url: string, time: number) {
-    return await axios.get(url,
-        {
-            params: {
-                query: 'sum(container_memory_working_set_bytes) by(pod)',
-                time: time,
-                step: '1'
-            }
-        }
-    );
-}
-async function cpuUsage(url: string, time: number) {
-    return await axios.get(url,
-        {
-            params: {
-                query: 'sum(rate(container_cpu_usage_seconds_total[120s])) by(pod)',
-                time: time,
-                step: '1'
-            }
-        }
-    );
-}
-async function memoryResourceRequests(url: string, time: number) {
-    return await axios.get(url,
-        {
-            params: {
-                query: 'sum(kube_pod_container_resource_requests{resource="memory"}) by(pod)',
-                time: time,
-                step: '1'
-            }
-        }
-    );
-}
-async function cpuResourceRequests(url: string, time: number) {
-    return await axios.get(url,
-        {
-            params: {
-                query: 'sum(kube_pod_container_resource_requests{resource="cpu"}) by(pod)',
-                time: time,
-                step: '1'
-            }
-        }
-    );
-}
-async function memoryOneHourTrend(url: string, start: number, end: number) {
-    return await axios.get(url,
-        {
-            params: {
-                query: 'sum(container_memory_working_set_bytes) by(pod)',
-                start: start,
-                end: end,
-                step: '360'
-            }
-        }
-    );
-}
-async function cpuOneHourTrend(url: string, start: number, end: number) {
-    return await axios.get(url,
-        {
-            params: {
-                query: 'sum(rate(container_cpu_usage_seconds_total[120s])) by(pod)',
-                start: start,
-                end: end,
-                step: '360'
-            }
-        }
-    );
-}
-function average(pods) {
-    let sum = 0;
-    for (let i = 0; i < pods.values.length; i++) {
-        sum += parseFloat(pods.values[i][1]);
-    }
-    return sum / pods.values.length;
-}
-function outlierAverage(pods) {
-    const values = pods.values.map((value) => parseFloat(value[1]));
-    const sortedValues = values.sort((a, b) => a - b);
-    const length = sortedValues.length;
-    const startIndex = Math.floor(length * 0.05);
-    const endIndex = Math.floor(length * 0.95);
-    const trimmedValues = sortedValues.slice(startIndex, endIndex);
-    const sum = trimmedValues.reduce((acc, val) => acc + val, 0);
-    return sum / trimmedValues.length;
-}
-function polynomialRegression(pods) {
-    const result = regression.polynomial(pods, {order: 2});
-    const indexToPredict = pods.length;
-    const coefficients = result.equation;
-    const equation = coefficients
-        .map((coefficient, i) => `${coefficient.toFixed(6)} * x^${i}`)
-        .join(' + ');
-    const value = result.predict(indexToPredict)[1];
-    return {
-        equation: equation,
-        value: value,
-    };
-}
-function byteToMegabyte(number: number) {
-    return Number(number / 1_048_576);
-}
-function coreToMilicore(number: number) {
-    return Number(number * 1_000);
-}
-
 const memoryMetrics = new Gauge({
-    name: 'memory_request_usage_diff',
+    name: 'memory_metrics',
     help: 'Gauge for monitoring memory usage and resource requests.',
     labelNames: ['type', 'pod'],
 });
+
 const cpuMetrics = new Gauge({
-    name: 'cpu_request_usage_diff',
+    name: 'cpu_metrics',
     help: 'Gauge for monitoring CPU usage and resource requests.',
     labelNames: ['type', 'pod'],
 });
@@ -135,30 +32,37 @@ const cpuMetrics = new Gauge({
 async function main() {
     try {
         const currentTime = new Date().getTime() / 1000;
-        const customTime_30minAgo = currentTime - 1800;
-        const customTime_120minAgo = currentTime - 7200;
+        const thirtyMinAgo = currentTime - 1800;
+        const oneDayAgo = currentTime - 86400;
 
-        const memoryHourlyTrend = await memoryOneHourTrend(process.env.API_URL + '/api/v1/query_range', customTime_120minAgo, currentTime);
-        const cpuHourlyTrend = await cpuOneHourTrend(process.env.API_URL + '/api/v1/query_range', customTime_120minAgo, currentTime);
+        const memoryHourlyTrend = await prometheusRequest.getMemoryTrend(process.env.API_URL + '/api/v1/query_range', oneDayAgo, currentTime);
+        const cpuHourlyTrend = await prometheusRequest.getCpuTrend(process.env.API_URL + '/api/v1/query_range', oneDayAgo, currentTime);
 
-        const memoryUsageBytesCurrent = await memoryUsage(process.env.API_URL + '/api/v1/query', currentTime);
-        const memoryResourceRequestCurrent = await memoryResourceRequests(process.env.API_URL + '/api/v1/query', currentTime);
-        const cpuUsageCoresCurrent = await cpuUsage(process.env.API_URL + '/api/v1/query', currentTime);
-        const cpuResourceRequestCurrent = await cpuResourceRequests(process.env.API_URL + '/api/v1/query', currentTime);
+        const memoryUsageBytesCurrent = await prometheusRequest.getMemoryUsage(process.env.API_URL + '/api/v1/query', currentTime);
+        const memoryResourceRequestCurrent = await prometheusRequest.getMemoryRequest(process.env.API_URL + '/api/v1/query', currentTime);
+        const cpuUsageCoresCurrent = await prometheusRequest.getCpuUsage(process.env.API_URL + '/api/v1/query', currentTime);
+        const cpuResourceRequestCurrent = await prometheusRequest.getCpuRequest(process.env.API_URL + '/api/v1/query', currentTime);
 
-        const memoryUsageBytesCustom = await memoryUsage(process.env.API_URL + '/api/v1/query', customTime_30minAgo);
-        const memoryResourceRequestCustom = await memoryResourceRequests(process.env.API_URL + '/api/v1/query', customTime_30minAgo);
-        const cpuUsageCoresCustom = await cpuUsage(process.env.API_URL + '/api/v1/query', customTime_30minAgo);
-        const cpuResourceRequestCustom = await cpuResourceRequests(process.env.API_URL + '/api/v1/query', customTime_30minAgo);
+        const memoryUsageBytesCustom = await prometheusRequest.getMemoryUsage(process.env.API_URL + '/api/v1/query', thirtyMinAgo);
+        const memoryResourceRequestCustom = await prometheusRequest.getMemoryRequest(process.env.API_URL + '/api/v1/query', thirtyMinAgo);
+        const cpuUsageCoresCustom = await prometheusRequest.getCpuUsage(process.env.API_URL + '/api/v1/query', thirtyMinAgo);
+        const cpuResourceRequestCustom = await prometheusRequest.getCpuRequest(process.env.API_URL + '/api/v1/query', thirtyMinAgo);
 
         const pod = {}
-        const indexedData = {};
-        // Indexing the trend data in order to use in polynomial function
+        const indexedMemoryData = {};
+        const indexedCpuData = {};
+        // Indexing the trend data of the memory and CPU in order to use in polynomial function
         for (const pod of memoryHourlyTrend.data.data.result) {
             const values = pod.values.map(([, value]) => Number(value));
             const indexedValues = values.map((value, index) => [index, value]);
-            indexedData[pod.metric.pod] = indexedValues;
+            indexedMemoryData[pod.metric.pod] = indexedValues;
         }
+        for (const pod of cpuHourlyTrend.data.data.result) {
+            const values = pod.values.map(([, value]) => Number(value));
+            const indexedValues = values.map((value, index) => [index, value]);
+            indexedCpuData[pod.metric.pod] = indexedValues;
+        }
+
 
         // Memory Usage Metrics
         for (const pods of memoryUsageBytesCurrent.data.data.result) {
@@ -192,7 +96,7 @@ async function main() {
         for (const pods of memoryHourlyTrend.data.data.result) {
             pod[pods.metric.pod] ??= {};
             pod[pods.metric.pod].memoryExpectedUsagePolynomialRegression =
-                byteToMegabyte(polynomialRegression(indexedData[pods.metric.pod]).value);
+                byteToMegabyte(polynomialRegression(indexedMemoryData[pods.metric.pod]).value);
         }
 
         // CPU Usage Metrics
@@ -218,73 +122,135 @@ async function main() {
             pod[pods.metric.pod] ??= {};
             pod[pods.metric.pod].cpuExpectedUsage = coreToMilicore(average(pods));
         }
+        // CPU Expected Usage (Calculated with averaging)
+        for (const pods of cpuHourlyTrend.data.data.result) {
+            pod[pods.metric.pod] ??= {};
+            pod[pods.metric.pod].cpuExpectedUsageAvg = coreToMilicore(average(pods));
+        }
+        // CPU Expected Usage (Calculated with outlier averaging)
+        for (const pods of cpuHourlyTrend.data.data.result) {
+            pod[pods.metric.pod] ??= {};
+            pod[pods.metric.pod].cpuExpectedUsageOutlierAvg = coreToMilicore(outlierAverage(pods));
+        }
+        // CPU Expected Usage (Calculated with polynomial regression)
+        for (const pods of cpuHourlyTrend.data.data.result) {
+            pod[pods.metric.pod] ??= {};
+            pod[pods.metric.pod].cpuExpectedUsagePolynomialRegression =
+                coreToMilicore(polynomialRegression(indexedCpuData[pods.metric.pod]).value);
+        }
 
         for (const podName of Object.keys(pod)) {
             // Memory Gauge
-            memoryMetrics.labels(
-                {
-                    type: 'current_diff_between_usage_and_request',
+            if (pod[podName].memoryUsage !== undefined) {
+                memoryMetrics.labels({
+                    type: 'usage',
                     pod: podName
-                })
-                .set(pod[podName].memoryUsage - (pod[podName].memoryRequest ?? 0));
-            memoryMetrics.labels(
-                {
-                    type: 'historic_diff_between_usage_and_request',
-                    pod: podName
-                })
-                .set((pod[podName].memoryUsage - (pod[podName].memoryRequest ?? 0)) -
-                    (pod[podName].memoryUsageHistoric ?? 0) - (pod[podName].memoryRequestHistoric ?? 0));
-            memoryMetrics.labels(
-                {
-                    type: 'deviation_from_expected',
-                    pod: podName
-                })
-                .set(pod[podName].memoryUsage - pod[podName].memoryExpectedUsagePolynomialRegression);
-            memoryMetrics.labels(
-                {
-                    type: 'expected_usage_polynomial_regression',
-                    pod: podName
-                })
-                .set(pod[podName].memoryExpectedUsagePolynomialRegression);
+                }).set(pod[podName].memoryUsage);
+                memoryMetrics.labels(
+                    {
+                        type: 'difference_between_usage_and_request',
+                        pod: podName
+                    })
+                    .set(pod[podName].memoryUsage - (pod[podName].memoryRequest ?? 0));
+                memoryMetrics.labels(
+                    {
+                        type: 'historic_difference_between_usage_and_request(30min)',
+                        pod: podName
+                    })
+                    .set((pod[podName].memoryUsage - (pod[podName].memoryRequest ?? 0)) -
+                        (pod[podName].memoryUsageHistoric ?? 0) - (pod[podName].memoryRequestHistoric ?? 0));
+                memoryMetrics.labels(
+                    {
+                        type: 'predictive_value(polynomial_regression)',
+                        pod: podName
+                    })
+                    .set(pod[podName].memoryExpectedUsagePolynomialRegression);
+                memoryMetrics.labels(
+                    {
+                        type: 'predictive_value(average)',
+                        pod: podName
+                    })
+                    .set(pod[podName].memoryExpectedUsageAvg);
+                memoryMetrics.labels(
+                    {
+                        type: 'predictive_value(outlier_avg)',
+                        pod: podName
+                    })
+                    .set(pod[podName].memoryExpectedUsageOutlierAvg);
+                memoryMetrics.labels(
+                    {
+                        type: 'deviation_from_prediction',
+                        pod: podName
+                    })
+                    .set(pod[podName].memoryUsage - pod[podName].memoryExpectedUsagePolynomialRegression);
+            }
             if (pod[podName].hasOwnProperty('memoryRequest')) {
                 memoryMetrics.labels(
                     {
-                        type: 'current_percentage_of_usage_and_request',
+                        type: 'percentage_of_usage_and_request',
                         pod: podName
                     })
                     .set((pod[podName].memoryUsage / pod[podName].memoryRequest) * 100)
                 memoryMetrics.labels(
                     {
-                        type: 'historic_percentage_of_usage_and_request',
+                        type: 'historic_percentage_of_usage_and_request(30min)',
                         pod: podName
                     })
                     .set((pod[podName].memoryUsageHistoric / pod[podName].memoryRequestHistoric) * 100)
             } else {
                 memoryMetrics.labels(
                     {
-                        type: 'current_percentage_of_usage_and_request',
+                        type: 'percentage_of_usage_and_request',
                         pod: podName
                     })
                     .set(999999);
             }
             // CPU Gauge
-            cpuMetrics.labels(
-                {
-                    type: 'current_diff_between_usage_and_request',
-                    pod: podName
-                })
-                .set(pod[podName].cpuUsage - (pod[podName].cpuRequest ?? 0));
-            cpuMetrics.labels(
-                {
-                    type: 'historic_diff_between_usage_and_request',
-                    pod: podName
-                })
-                .set((pod[podName].cpuUsage - (pod[podName].cpuRequest ?? 0)) -
-                    (pod[podName].cpuUsageHistoric ?? 0) - (pod[podName].cpuRequestHistoric ?? 0));
+            if (pod[podName].cpuUsage !== undefined) {
+                cpuMetrics.labels(
+                    {
+                        type: 'difference_between_usage_and_request',
+                        pod: podName
+                    })
+                    .set(pod[podName].cpuUsage - (pod[podName].cpuRequest ?? 0));
+                cpuMetrics.labels(
+                    {
+                        type: 'historic_difference_between_usage_and_request',
+                        pod: podName
+                    })
+                    .set((pod[podName].cpuUsage - (pod[podName].cpuRequest ?? 0)) -
+                        (pod[podName].cpuUsageHistoric ?? 0) - (pod[podName].cpuRequestHistoric ?? 0));
+                cpuMetrics.labels(
+                    {
+                        type: 'predictive_value(polynomial_regression)',
+                        pod: podName
+                    })
+                    .set(pod[podName].cpuExpectedUsagePolynomialRegression);
+                cpuMetrics.labels(
+                    {
+                        type: 'predictive_value(average)',
+                        pod: podName
+                    })
+                    .set(pod[podName].cpuExpectedUsageAvg);
+                cpuMetrics.labels(
+                    {
+                        type: 'predictive_value(outlier_avg)',
+                        pod: podName
+                    })
+                    .set(pod[podName].cpuExpectedUsageOutlierAvg);
+                cpuMetrics.labels(
+                    {
+                        type: 'deviation_from_prediction',
+                        pod: podName
+                    })
+                    .set(pod[podName].cpuUsage - pod[podName].cpuExpectedUsagePolynomialRegression);
+
+            }
+
             if (pod[podName].hasOwnProperty('cpuRequest')) {
                 cpuMetrics.labels(
                     {
-                        type: 'current_percentage_of_usage_and_request',
+                        type: 'percentage_of_usage_and_request',
                         pod: podName
                     })
                     .set((pod[podName].cpuUsage / pod[podName].cpuRequest) * 100)
@@ -297,7 +263,7 @@ async function main() {
             } else {
                 cpuMetrics.labels(
                     {
-                        type: 'current_percentage_of_usage_and_request',
+                        type: 'percentage_of_usage_and_request',
                         pod: podName
                     })
                     .set(999999);
